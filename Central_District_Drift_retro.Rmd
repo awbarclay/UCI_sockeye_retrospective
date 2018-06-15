@@ -1,0 +1,342 @@
+---
+title: "Central District Drift"
+author: "Andy Barclay"
+date: "June 6, 2018"
+output: html_document
+---
+##Set up workspace
+###Get functions and load tidy packages
+```{r workspace setup, echo=TRUE}
+
+source("C:\\Users\\awbarclay\\Documents\\R\\GitHubCloneFunctions.R")#GCL functions
+source("LOKI2R_UCIRetro.GCL.R")#This is a modified version of LOKI2R that access a lookup table with addtional attributes for contamination data
+
+library("tidyverse")
+
+```
+
+###Create locus control
+```{r locus control, echo=TRUE}
+
+#CreateLocusControl.GCL(markersuite = "Sockeye2011_96SNPs", username ="awbarclay", password = password)#Locus control
+
+sillyvec<-scan("Data/DriftSillys.txt",what="")
+
+#LOKI2R_UCIRetro.GCL(sillyvec=sillyvec,username="awbarclay",password)#Pull Data from LOKI
+
+#save.image("V:/Analysis/2_Central/Sockeye/Cook Inlet/2012 Baseline/Mixture/UCI_sockeye_retrospective/CentralDistrictDrift.Rdata")
+
+load("V:/Analysis/2_Central/Sockeye/Cook Inlet/2012 Baseline/Mixture/UCI_sockeye_retrospective/CentralDistrictDrift.Rdata")
+```
+###Create inital locus object
+This is the list of all 96 loci - may have to drop some loci if they have too much missing data
+```{r initial locus object}
+
+loci <- LocusControl$locusnames
+loci
+
+```
+
+##Data cleanup
+###Check initial sample size
+SUCICD05 has only 9 samples because it was analyzed previously under a different silly 
+```{r initial sample size, echo=TRUE}
+
+silly_N<-function(sillyvec){sapply(sillyvec,function(silly){get(paste0(silly,".gcl"))$n})}
+
+ColSize<-data.frame(row.names = sillyvec)
+ColSize$Original_N <- silly_N(sillyvec)
+ColSize
+
+```
+###Check genotypes by locus
+This is the proportion of the samples with genotypes by locus
+```{r sample size by locus}
+
+SampSizeByLoc<-as.tibble(SampSizeByLocus.GCL(sillyvec,loci)/ColSize$Original_N) %>% 
+  mutate(Collection=sillyvec) %>% 
+  select(Collection,everything()) %>% 
+  gather(key=Locus,value="Proportion",-Collection)
+
+head(SampSizeByLoc)
+```
+#Heatmap to check for holes
+```{r heatmap of genotype holes, fig.height=24, fig.width=20}
+SampSizeByLoc %>% 
+  ggplot(aes(Collection,Locus,fill=Proportion))+
+  geom_tile()
+
+```
+#Average weighted proportion genotypes by locus
+```{r barplot avg genotypes by locus, fig.height=10, fig.width=20}
+
+Prop_Genotyped<-SampSizeByLoc %>% 
+  mutate(n=rep(ColSize$Original_N,length(loci))) %>% 
+  mutate(prop_n=Proportion*n) %>% 
+  group_by(Locus) %>% 
+  summarise(Average_Success=sum(prop_n)/sum(n)) %>% 
+  mutate(Locus=loci)
+ 
+
+Prop_Genotyped%>% 
+  ggplot(aes(reorder(Locus,-Average_Success),Average_Success,fill=Average_Success))+
+  geom_bar(stat="identity",position = "dodge")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+Prop_Genotyped
+
+```
+
+###Removing individuals with <80% of loci with gentotypes
+Fish that have gentoypes for less than 80% of loci are likely to have poor quality DNA and might introduce gentotyping errors into the mixture data and reduce the accruacy of the mixed stock analysis (MSA)
+```{r missloci,echo=TRUE,results=FALSE,message=FALSE}
+
+MissLOCI=RemoveIndMissLoci.GCL(sillyvec=sillyvec,proportion=0.8)
+
+
+ColSize$AfterMissLoci_N <-  silly_N(sillyvec)
+ColSize
+
+```
+###Removing fish with high contamination
+Here I'm checking to see if most of the contaminated individuals were dropped for 80% of loci rule. If they were, then we don't need to analyze scale samples with microsats to figure out which individuals are contaminated 
+```{r get contamn IDs, results=FALSE}
+load("V:/Analysis/2_Central/Sockeye/Cook Inlet/2012 Baseline/Mixture/UCI_sockeye_retrospective/CentralDistrictDrift.Rdata")#reload workspace with all samples
+
+Contam_IDs<-set_names(lapply(sillyvec,function(silly){
+
+ attr=as.tibble(get(paste0(silly,".gcl"))$attributes)
+ 
+ attr %>% 
+   filter(PRIMARY_STATUS=="Contaminated") %>% 
+   select(FK_FISH_ID)
+  
+  
+}),sillyvec)
+
+
+```
+```{r remove contaminated individuals}
+
+sapply(sillyvec,function(silly){
+  
+  RemoveIDs.GCL(silly=silly,IDs=Contam_IDs[[silly]])
+  
+})
+
+ColSize$MinusContaminated_N <-  silly_N(sillyvec)
+
+MissLOCI_post_contam=RemoveIndMissLoci.GCL(sillyvec=sillyvec,proportion=0.8)
+
+ColSize$MissLoci_Contam_N<-silly_N(sillyvec)
+
+ColSize
+
+
+```
+
+```{r match missloci and contam IDs}
+
+bind_rows(lapply(sillyvec,function(silly){
+  
+  Missloci_n=length(MissLOCI[[silly]])
+  
+  Contam_n=length(Contam_IDs[[silly]])
+  
+  Contam_in_Missloci=length(na.omit(match(MissLOCI[[silly]],Contam_IDs[[silly]])))
+  
+  tibble(silly=silly,Missloci_n=Missloci_n,Contam_n=Contam_n,Contam_in_Missloci=Contam_in_Missloci)
+  
+}))%>% 
+  mutate(Prop_Contam_rm_by_MissLoci=Contam_in_Missloci/Contam_n)
+
+```
+
+###Remove some loci before missloci
+I'm doing tis to see if removing markers with fewer than 85% of individuals with scores will reduce the nubmer of individuals dropped by missLoci.  I have to use the PoolCollections.GCL function to reduce the nubmer of markers in each collection ot
+```{r create temp .gcl objects, results=FALSE}
+load("V:/Analysis/2_Central/Sockeye/Cook Inlet/2012 Baseline/Mixture/UCI_sockeye_retrospective/CentralDistrictDrift.Rdata")#reload workspace with all samples
+
+loci85percent<-Prop_Genotyped %>% 
+  filter(Average_Success>0.85) %>% 
+  select(Locus)
+  
+
+sapply(sillyvec,function(silly){
+  
+  PoolCollections.GCL(collections = silly,loci=loci85percent$Locus,newname = paste0(silly,"tmp"))
+  
+})
+
+```
+This these are the proprotion of individuals saved by not inculding poor loci.
+```{r missloci 90 loci}
+sillyvec.tmp<-paste0(sillyvec,"tmp")
+
+Missloci_90loci<-RemoveIndMissLoci.GCL(sillyvec=sillyvec.tmp)
+
+AfterMissLoci_N_90loci<-silly_N(sillyvec.tmp)
+
+(AfterMissLoci_N_90loci-ColSize$AfterMissLoci_N)/ColSize$Original_N
+
+```
+These are the final sample sizes using 90 vs 96 loci after dropping contaminated and missing loci individuals.  There doesn't seem to be much benefit in reducing the number of loci.
+```{r remove contaminated individuals 90 loci,message=FALSE}
+
+
+
+tmp<-sapply(sillyvec,function(silly){
+  
+  PoolCollections.GCL(collections = silly,loci=loci85percent$Locus,newname = paste0(silly,"tmp"))
+  
+})
+
+
+Contam_IDs.tmp<-set_names(lapply(sillyvec.tmp,function(silly){
+
+ attr=as.tibble(get(paste0(silly,".gcl"))$attributes)
+ 
+ attr %>% 
+   filter(PRIMARY_STATUS=="Contaminated") %>% 
+   select(FK_FISH_ID)
+  
+  
+}),sillyvec.tmp)
+
+tmp<-sapply(sillyvec.tmp,function(silly){
+  
+  RemoveIDs.GCL(silly=silly,IDs=Contam_IDs.tmp[[silly]])
+  
+})
+
+MinusContaminated_N_90loci<-silly_N(sillyvec.tmp)
+
+MissLOCI_post_contam_90=RemoveIndMissLoci.GCL(sillyvec=sillyvec.tmp,proportion=0.8)
+
+MissLoci_Contam_N_90<-silly_N(sillyvec.tmp)
+
+cbind(MissLoci_Contam_N_96loci=ColSize$MissLoci_Contam_N,MissLoci_Contam_N_90loci=MissLoci_Contam_N_90)
+
+
+```
+###Remove contaminated and fish with less than 80% of genotypes
+
+```{r remove ind miss loci again}
+RemoveIndMissLoci.GCL(sillyvec=sillyvec,proportion=0.8)
+sapply(sillyvec,function(silly){
+  
+  RemoveIDs.GCL(silly=silly,IDs=Contam_IDs[[silly]])
+  
+})
+silly_N(sillyvec)
+```
+
+
+
+###Check for duplicate individuals and remove them
+Fish with 99% of scores that match
+```{r dupckeck, echo=TRUE, message=FALSE}
+
+dupck<-CheckDupWithinSilly.GCL(sillyvec=sillyvec,loci=loci,quantile=NULL,minproportion=0.99)
+
+
+```
+```{r remove duplicate fish,results="hide"}
+
+dups_removed<-RemoveDups.GCL(dupck)
+
+```
+```{r final sample size}
+ColSize$Final_N <- silly_N(sillyvec)
+ColSize
+
+```
+
+###Combine MHCs and mitochondiral markers
+These markers are linked and have to be combined into haploid markers in the baseline analysis; therefore, they have to be combined for the the mixed stock analysis
+```{r combine loci,results="hide"}
+
+ CombineLoci.GCL(sillyvec=sillyvec,markerset=c("One_MHC2_190","One_MHC2_251"),update=TRUE)
+ CombineLoci.GCL(sillyvec=sillyvec,markerset=c("One_CO1","One_Cytb_17","One_Cytb_26"),update=TRUE)
+
+```
+
+
+###Check to see if sample sizes are in proportion to harvest by week
+####Get Drift harvest numbers by week from OceanAK report[here](V:\Analysis\2_Central\Sockeye\Cook Inlet\2012 Baseline\Mixture\UCI_sockeye_retrospective\Data\UCI_Harvests_1986to2004.csv)
+```{r get harvest report}
+
+require(lubridate)
+
+HarRpt<-read_csv("Data/UCI_Harvests_1986to2004.csv") %>% 
+  mutate(Week=week(Date_Fishing_Began)) %>%
+  filter(Gear_Name=="Drift gillnet") %>%
+  select(-Species_Name,-Gear_Code) 
+
+```
+```{r total harvest by year}
+
+Total_har_year<-HarRpt %>% 
+  group_by(Batch_Year) %>% 
+  summarise(Harvest=sum(Number_Of_Animals)) %>% 
+  mutate(Year=Batch_Year)
+
+Total_har_year %>% 
+  ggplot(aes(Year,Harvest/1000000,fill=Harvest/1000000))+
+  geom_bar(stat="identity")+
+  ylab("Harvest (millions)")
+
+```
+###Harvest by week
+```{r proportion of harvest by week}
+
+Harvest_by_week<-HarRpt %>% 
+  group_by(Batch_Year,Week) %>% 
+  summarise(Weekly_Harvest=sum(Number_Of_Animals)) %>% 
+  left_join(Total_har_year,by=c("Batch_Year"))
+
+```
+
+###Samples by week
+```{r proportion of samples by week}
+require(lubridate)
+Samples_by_week<-bind_rows(lapply(sillyvec,function(silly){
+  
+  attr<-as.tibble(get(paste0(silly,".gcl"))$attributes) %>% 
+    mutate(Week=week(CAPTURE_DATE),Year=year(CAPTURE_DATE)) ;
+    
+  
+  attr %>%  
+    group_by(Year,Week) %>% 
+    summarise(Samples=n_distinct(FK_FISH_ID))%>% 
+    ungroup() %>% 
+    mutate(Prop_samples=Samples/ColSize[silly,]$Final_N) 
+      
+}))
+
+
+
+```
+
+
+###Plot harvest and samples by week on the same plot
+```{r fig.height=20, fig.width=20}
+library(grid)
+ 
+Har_Samp_df<-left_join(Harvest_by_week,Samples_by_week,by=c("Week","Year")) %>% 
+  ungroup() %>% 
+  select(-Batch_Year,-Harvest,-Prop_samples) %>% 
+  gather(key="Variable",value="N",Samples,Weekly_Harvest,-Week,-Year) %>% 
+  filter(Year!="1989")
+
+
+Har_Samp_df %>% ggplot(aes(Week,N,fill=Variable))+
+  geom_bar(stat="identity")+
+  facet_wrap(~Year+Variable,scales="free_y")
+
+ggsave(filename="Harvest and samples by week.png",device="png",width=20,height =10)
+
+
+```
+
+
