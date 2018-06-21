@@ -1,0 +1,96 @@
+---
+title: "Central District Drift 2005"
+author: "Andy Barclay"
+date: "June 21, 2018"
+output: html_document
+---
+
+##Set up workspace
+###Get functions and load tidy packages
+```{r workspace setup, echo=TRUE}
+
+source("C:\\Users\\awbarclay\\Documents\\R\\GitHubCloneFunctions.R")#GCL functions
+source("LOKI2R_UCIRetro.GCL.R")#This is a modified version of LOKI2R that access a lookup table with addtional attributes for contamination data
+
+library("tidyverse")
+
+```
+
+###Create locus control
+```{r locus control, echo=TRUE}
+
+#CreateLocusControl.GCL(markersuite = "Sockeye2011_96SNPs", username ="awbarclay", password = password)#Locus control
+
+sillyvec<-c("SUCICD05","SCDD105","SCDD205","SCDD305","SCDD405","SCDD505","SCDD605","SCDD705","SCDD805","SCDD905")
+
+#LOKI2R_UCIRetro.GCL(sillyvec=sillyvec,username="awbarclay",password)#Pull Data from LOKI
+
+#save.image("V:/Analysis/2_Central/Sockeye/Cook Inlet/2012 Baseline/Mixture/UCI_sockeye_retrospective/CentralDistrictDrift2005.Rdata")
+
+load("V:/Analysis/2_Central/Sockeye/Cook Inlet/2012 Baseline/Mixture/UCI_sockeye_retrospective/CentralDistrictDrift2005.Rdata")
+```
+###Create inital locus object
+This is the list of all 96 loci - may have to drop some loci if they have too much missing data
+```{r initial locus object}
+
+loci <- LocusControl$locusnames
+loci
+
+```
+
+##Data cleanup
+###Check initial sample size
+SUCICD05 has only 9 samples because it was analyzed previously under a different silly 
+```{r initial sample size, echo=TRUE}
+
+silly_N<-function(sillyvec){sapply(sillyvec,function(silly){get(paste0(silly,".gcl"))$n})}
+
+ColSize<-data.frame(row.names = sillyvec)
+ColSize$Original_N <- silly_N(sillyvec)
+ColSize
+
+```
+###Check genotypes by locus
+This is the proportion of the samples with genotypes by locus
+```{r sample size by locus}
+
+SampSizeByLoc<-as.tibble(SampSizeByLocus.GCL(sillyvec,loci)/ColSize$Original_N) %>% 
+  mutate(Collection=sillyvec) %>% 
+  select(Collection,everything()) %>% 
+  gather(key=Locus,value="Proportion",-Collection)
+
+head(SampSizeByLoc)
+```
+####Heatmap to check for holes
+```{r heatmap of genotype holes, fig.height=24, fig.width=20}
+SampSizeByLoc %>% 
+  ggplot(aes(Collection,Locus,fill=Proportion))+
+  geom_tile()
+
+```
+####Find common locus set
+```{r loci to drop}
+
+DropLoci<-SampSizeByLoc %>% 
+  filter(Proportion=="0") %>%
+  select(Locus) %>% 
+  unique() %>% 
+  pull(Locus) %>% 
+  str_replace_all(pattern=fixed("."), replacement="-")  
+
+```
+
+```{r new locus list}
+
+loci37<-loci[-match(DropLoci,loci)]
+
+write_csv(data_frame(Sockeye_retrospective_37SNPs=loci37),path="Output/Sockeye_retrospective_37SNPs.csv")#This is for adding loci to a new markersuite in LOKI. Note had to delete header in CSV file before importing to the markersuite
+
+```
+###New LocusControl
+I have to make a new locus control for the 37 loci or many collections will get removed for missing loci.
+To do this I had to set up a new markersuite in LOKI for the 37 loci. 
+```{r new LocusControl}
+
+```
+
